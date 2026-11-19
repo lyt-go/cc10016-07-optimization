@@ -17,6 +17,7 @@ from app.engine import (
     chain_seed_cursor_advance,
 )
 from app.schemas import ActionResult
+from app.services.quota import quota_service
 
 router = APIRouter(prefix="/api/chain", tags=["跨模块链路"])
 
@@ -84,3 +85,17 @@ def api_full_pipeline(source_id: int, html: str, records: list[dict[str, Any]]) 
     """链路9: 全链路贯通：源配置 -> 抽取 -> 转换 -> 去重 -> 校验 -> 落地"""
     result = chain_full_pipeline(source_id, html, records)
     return {"ok": result.get("ok", False), "message": result.get("message", ""), "entry": result}
+
+
+@router.get("/quota-consistency/{rate_limit_id}")
+def api_quota_consistency(rate_limit_id: int) -> dict[str, Any]:
+    """核对配额状态：令牌数 + 在途令牌 = 并发上限，当日用量与流水一致。"""
+    result = quota_service.check(rate_limit_id)
+    return {"ok": result["ok"], "message": "配额状态一致" if result["ok"] else "、".join(result["issues"]),
+            "entry": result}
+
+
+@router.get("/quota-policy")
+def api_quota_policy() -> dict[str, Any]:
+    """配额状态数据的统一口径与写入顺序说明。"""
+    return {"ok": True, "policy": quota_service.policy()}

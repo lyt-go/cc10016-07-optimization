@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h2>会话管理管理</h2>
-        <p class="page-desc">维护采集会话的登录凭证、超时与状态轮转，为会话管理提供可验证的数据工程流程。</p>
+        <p class="page-desc">维护采集会话的登录凭证、超时与状态轮转；记录请求时在请求日志写入前后核对频次控制下发的令牌与当日用量。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">登记采集会话</button>
@@ -31,12 +31,21 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th v-for="column in quotaColumns" :key="column">{{ column }}</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
+        <tr
+          v-for="row in rows"
+          :key="String(row.id)"
+          :data-testid="`row-${row.id}`"
+          :data-status="String(row.status)"
+        >
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in quotaColumns" :key="column" :data-testid="`quota-${column}-${row.id}`">
+            {{ quotaCell(row, column) }}
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -48,13 +57,24 @@
             >
               {{ action }}
             </button>
+            <button
+              class="link"
+              type="button"
+              :data-testid="`record-${row.id}`"
+              :disabled="busyId === row.id"
+              @click="recordRequest(row)"
+            >
+              {{ busyId === row.id ? '记录中…' : '记录请求' }}
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无会话管理数据，可先登记采集会话</td>
+          <td :colspan="columns.length + quotaColumns.length + 1" class="empty-state">暂无会话管理数据，可先登记采集会话</td>
         </tr>
       </tbody>
     </table>
+
+    <p v-if="quotaMessage" class="page-foot" data-testid="quota-message">{{ quotaMessage }}</p>
 
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
@@ -88,6 +108,7 @@ type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/session_mgr'
 const columns = ["会话编号", "关联源", "登录状态", "最后活动", "请求计数", "Cookie摘要", "UserAgent", "会话时长"]
+const quotaColumns = ["令牌数", "当日已用配额", "请求日志数", "数据版本"]
 const actions = ["标记活跃", "标记过期", "标记失效"]
 const statuses = ["草稿", "活跃", "已过期", "已失效"]
 const metricNames = ["采集会话总数", "活跃会话", "已过期会话"]
@@ -95,6 +116,8 @@ const metricNames = ["采集会话总数", "活跃会话", "已过期会话"]
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const quotaMessage = ref('')
+const busyId = ref<number | null>(null)
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
@@ -109,6 +132,42 @@ const stats = computed(() => [
 function resetFilters() {
   filters.value = {}
   void reload()
+}
+
+function quotaCell(row: Row, column: string): string | number {
+  const state = (row._quota_state ?? {}) as Record<string, string | number>
+  const value = state[column]
+  return value === undefined || value === null ? '—' : value
+}
+
+async function recordRequest(row: Row) {
+  busyId.value = row.id as number
+  errorMessage.value = ''
+  quotaMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${row.id}/record`, {
+      method: 'POST',
+      body: JSON.stringify({ url: `/crawl/session/${row.id}`, latency: 120, order: 'log_first' }),
+    })
+    const payload = await response.json()
+    if (!response.ok || payload.ok === false) throw new Error(payload.error || '请求记录失败')
+    const quota = payload.quota ?? {}
+    const state = quota.state ?? {}
+    const parts = [
+      `${payload.request_log_id} 已记录`,
+      quota.allowed ? '配额扣减成功' : `配额未放行（${quota.reason ?? '待补记'}）`,
+      `令牌数 ${state.tokens ?? '—'}`,
+      `当日已用配额 ${state.daily_used ?? '—'}`,
+      `请求日志数 ${state.request_log_count ?? '—'}`,
+    ]
+    if (quota.consistent === false) parts.push('前后核对未通过')
+    quotaMessage.value = parts.join('，')
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '请求记录失败'
+  } finally {
+    busyId.value = null
+  }
 }
 
 async function exportRows() {

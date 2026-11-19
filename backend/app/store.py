@@ -29,7 +29,10 @@ class Store:
             "content_extract_results": {},   # content_extract 提取结果
             "data_validate_reports": {},     # data_validate 校验报告
             "result_store_partitions": {},   # result_store 分区元数据
-            "rate_limit_states": {},         # rate_limit 令牌桶状态
+            "rate_limit_states": {},         # rate_limit 令牌桶状态（含版本号）
+            "rate_limit_ledger": [],         # rate_limit 令牌流水（扣减/释放/回滚）
+            "quota_consumption_links": {},   # 请求日志编号 -> 已扣配额记录
+            "session_quota_checks": {},      # session_mgr 请求前后核对结果
         }
         # 模块间关系索引（外键映射）——基于 seed 数据自动构建
         self._relations: dict[str, list[dict[str, Any]]] = {

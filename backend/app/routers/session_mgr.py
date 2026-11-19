@@ -8,7 +8,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.services.quota import quota_service
 from app.services.session_mgr import SessionMgrService
+from app.store import store
 
 router = APIRouter(prefix="/api/session_mgr", tags=["会话管理"])
 
@@ -83,6 +85,25 @@ def create_entry(payload: dict[str, object]) -> ActionResult:
     return ActionResult(ok=True, message="采集会话已登记", entry=entry)
 
 
+@router.get("/{entry_id}/quota")
+def get_session_quota(entry_id: int) -> dict:
+    """读取会话关联的配额状态数据，以及最近一次请求前后的核对结果。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"采集会话 {entry_id} 不存在或已归档")
+    rate_id = service.resolve_rate_limit(entry)
+    checks = (store.pipeline_state("session_quota_checks") or {}).get(str(entry_id), [])
+    quota = None
+    if rate_id is not None:
+        quota = quota_service.ensure(int(rate_id))
+    return {
+        "session_id": entry_id,
+        "rate_limit_id": rate_id,
+        "quota": quota,
+        "checks": checks[-5:],
+    }
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条采集会话执行标记活跃、标记过期、标记失效；不允许的动作会被拦下并说明原因。"""
@@ -94,10 +115,28 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
 
 @router.post("/{entry_id}/record")
 def record_request(entry_id: int, payload: dict[str, object]) -> dict:
-    """记录会话请求。"""
+    """记录会话请求，并在请求日志写入前后核对配额状态。"""
     url = str(payload.get("url") or "")
     latency = float(payload.get("latency", 0))
-    return service.record_request(entry_id, url, latency)
+    rate_limit_id = payload.get("rate_limit_id")
+    return service.record_request(
+        entry_id, url, latency,
+        order=str(payload.get("order") or "log_first"),
+        rate_limit_id=int(rate_limit_id) if rate_limit_id is not None else None,
+    )
+
+
+@router.post("/{entry_id}/release")
+def release_request(entry_id: int, payload: dict[str, object] | None = None) -> dict:
+    """按请求日志释放令牌，释放前后补齐用量写入。"""
+    payload = payload or {}
+    expected_version = payload.get("expected_version")
+    return service.release_request(
+        entry_id,
+        request_log_id=str(payload["request_log_id"]) if payload.get("request_log_id") else None,
+        token_id=str(payload["token_id"]) if payload.get("token_id") else None,
+        expected_version=int(expected_version) if expected_version is not None else None,
+    )
 
 
 @router.post("/rotate")

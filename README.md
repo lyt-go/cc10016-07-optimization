@@ -75,5 +75,22 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+### 配额状态数据（频次控制 ⇄ 会话管理）
+
+配额状态由 `backend/app/services/quota.py` 统一加工，频次控制与会话管理都只通过
+`QuotaStateService` 读写，不再各自维护令牌桶：
+
+- `rate_limit_states` 是配额状态缓存（令牌数、当日已用配额、请求日志数、版本号），
+  `rate_limit_ledger` 是唯一事实来源；每次提交先写流水，再由流水重放生成缓存，
+  因此令牌数与当日用量要么一起更新，要么一起不更新。
+- 写入顺序可选 `quota_first`（先扣配额，日志编号随后补挂）与 `log_first`（先记日志，
+  扣减失败时保留日志并在释放前后补记用量）。两种顺序下请求日志数、令牌数与当日
+  用量都能互相核对。
+- 每次写入递增 `version`；版本冲突按优先级仲裁（扣减 > 释放/挂日志 > 刷新），
+  迟到的释放不会放宽下一次限流判断。
+- `POST /api/rate_limit/{id}/refresh` 只依据流水重建，发现缓存落后或令牌超限时回滚
+  并返回 `issues`；`GET /api/chain/quota-consistency/{id}` 可随时做只读核对。
+- 重复释放按 `token_id` 幂等，刷新后同一策略只保留一份配额状态。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

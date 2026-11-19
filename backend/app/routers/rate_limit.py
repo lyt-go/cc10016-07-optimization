@@ -53,10 +53,19 @@ def export_entries(
     output = io.StringIO()
     output.write("\ufeff")
     writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(["id", *LIST_FIELDS, "status"])
+    writer.writerow(["id", *LIST_FIELDS, "status", "令牌数", "当日已用配额", "请求日志数", "数据版本"])
     for item in items:
+        quota = item.get("_quota_state") or {}
         row = []
-        for value in [item.get("id"), *(item.get(field, "") for field in LIST_FIELDS), item.get("status", "")]:
+        for value in [
+            item.get("id"),
+            *(item.get(field, "") for field in LIST_FIELDS),
+            item.get("status", ""),
+            quota.get("令牌数", ""),
+            quota.get("当日已用配额", ""),
+            quota.get("请求日志数", ""),
+            quota.get("数据版本", ""),
+        ]:
             text = "" if value is None else str(value)
             row.append("'" + text if text.startswith(("=", "+", "-", "@")) else text)
         writer.writerow(row)
@@ -93,12 +102,48 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
 
 
 @router.post("/{entry_id}/acquire")
-def acquire_token(entry_id: int) -> dict:
-    """尝试获取请求令牌。"""
-    return service.acquire_token(entry_id)
+def acquire_token(entry_id: int, payload: dict[str, object] | None = None) -> dict:
+    """尝试获取请求令牌；可带请求日志编号与写入顺序（quota_first / log_first）。"""
+    payload = payload or {}
+    request_log_id = payload.get("request_log_id")
+    expected_version = payload.get("expected_version")
+    return service.acquire_token(
+        entry_id,
+        request_log_id=str(request_log_id) if request_log_id else None,
+        session_id=int(payload["session_id"]) if payload.get("session_id") is not None else None,
+        order=str(payload.get("order") or "quota_first"),
+        expected_version=int(expected_version) if expected_version is not None else None,
+    )
 
 
 @router.post("/{entry_id}/release")
-def release_token(entry_id: int) -> dict:
-    """释放令牌回桶。"""
-    return service.release_token(entry_id)
+def release_token(entry_id: int, payload: dict[str, object] | None = None) -> dict:
+    """释放令牌回桶；重复释放同一 token_id 幂等。"""
+    payload = payload or {}
+    expected_version = payload.get("expected_version")
+    return service.release_token(
+        entry_id,
+        token_id=str(payload["token_id"]) if payload.get("token_id") else None,
+        expected_version=int(expected_version) if expected_version is not None else None,
+        reconcile_usage=bool(payload.get("reconcile_usage", True)),
+    )
+
+
+@router.post("/{entry_id}/refresh")
+def refresh_quota(entry_id: int, payload: dict[str, object] | None = None) -> dict:
+    """读取采集请求配额并刷新令牌状态，返回刷新后的配额状态数据。"""
+    payload = payload or {}
+    expected_version = payload.get("expected_version")
+    return service.refresh_quota(
+        entry_id,
+        expected_version=int(expected_version) if expected_version is not None else None,
+    )
+
+
+@router.get("/{entry_id}/quota")
+def get_quota(entry_id: int) -> dict:
+    """只读配额状态数据：令牌数、当日已用配额与请求日志数。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"限流策略 {entry_id} 不存在或已归档")
+    return {"entry_id": entry_id, "quota": entry["_quota"], "quota_state": entry["_quota_state"]}
